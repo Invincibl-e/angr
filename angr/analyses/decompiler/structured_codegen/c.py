@@ -1753,6 +1753,8 @@ class CBinaryOp(CExpression):
             "CmpEQ": self._c_repr_chunks_cmpeq,
             "CmpNE": self._c_repr_chunks_cmpne,
             "Concat": self._c_repr_chunks_concat,
+            "Rol": self._c_repr_chunks_rol,
+            "Ror": self._c_repr_chunks_ror,
         }
 
         handler = OP_MAP.get(self.op, None)
@@ -1865,6 +1867,24 @@ class CBinaryOp(CExpression):
 
     def _c_repr_chunks_concat(self):
         yield from self._c_repr_chunks(" CONCAT ")
+
+    def _c_repr_chunks_rol(self):
+        yield "__ROL__", self
+        paren = CClosingObject("(")
+        yield "(", paren
+        yield from self._try_c_repr_chunks(self.lhs)
+        yield ", ", None
+        yield from self._try_c_repr_chunks(self.rhs)
+        yield ")", paren
+
+    def _c_repr_chunks_ror(self):
+        yield "__ROR__", self
+        paren = CClosingObject("(")
+        yield "(", paren
+        yield from self._try_c_repr_chunks(self.lhs)
+        yield ", ", None
+        yield from self._try_c_repr_chunks(self.rhs)
+        yield ")", paren
 
 
 class CTypeCast(CExpression):
@@ -2018,11 +2038,17 @@ class CConstant(CExpression):
 
         if self.reference_values is not None and self._type is not None and self._type in self.reference_values:
             if isinstance(self._type, SimTypeInt):
+                if isinstance(self.reference_values[self._type], int):
+                    yield self.fmt_int(self.reference_values[self._type]), self
+                    return
                 yield hex(self.reference_values[self._type]), self
             elif isinstance(self._type, SimTypePointer) and isinstance(self._type.pts_to, SimTypeChar):
                 refval = self.reference_values[self._type]  # angr.knowledge_plugin.cfg.MemoryData
                 yield CConstant.str_to_c_str(refval.content.decode("utf-8")), self
             else:
+                if isinstance(self.reference_values[self._type], int):
+                    yield self.fmt_int(self.reference_values[self._type]), self
+                    return
                 yield self.reference_values[self.type], self
 
         elif isinstance(self.value, int) and self.value == 0 and isinstance(self.type, SimTypePointer):
@@ -2038,29 +2064,39 @@ class CConstant(CExpression):
             yield "true" if self.value else "false", self
 
         elif isinstance(self.value, int):
-            value = self.value
-            if self.fmt_neg:
-                if value > 0:
-                    value = value - 2**self._type.size
-                elif value < 0:
-                    value = value + 2**self._type.size
-
-            str_value = None
-            if self.fmt_char:
-                try:
-                    str_value = f"'{chr(value)}'"
-                except ValueError:
-                    str_value = None
-
-            if str_value is None:
-                if self.fmt_hex:
-                    str_value = hex(value)
-                else:
-                    str_value = str(value)
-
+            str_value = self.fmt_int(self.value)
             yield str_value, self
         else:
             yield str(self.value), self
+
+    def fmt_int(self, value: int) -> str:
+        """
+        Format an integer using the format setup of the current node.
+
+        :param value:   The integer value to format.
+        :return:        The formatted string.
+        """
+
+        if self.fmt_neg:
+            if value > 0:
+                value = value - 2**self._type.size
+            elif value < 0:
+                value = value + 2**self._type.size
+
+        str_value = None
+        if self.fmt_char:
+            try:
+                str_value = f"'{chr(value)}'"
+            except ValueError:
+                str_value = None
+
+        if str_value is None:
+            if self.fmt_hex:
+                str_value = hex(value)
+            else:
+                str_value = str(value)
+
+        return str_value
 
 
 class CRegister(CExpression):

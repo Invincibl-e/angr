@@ -111,6 +111,19 @@ class TestCfgfast(unittest.TestCase):
 
         self.cfg_fast_functions_check("x86_64", "cfg_0_pe", functions, function_features)
 
+    def test_arm_function_merge(self):
+        # function 0x7bb88 is created due to a data hint in another block. this function should be merged with the
+        # previous function 0x7ba84
+
+        path = os.path.join(test_location, "armel", "tenda-httpd")
+        proj = angr.Project(path, auto_load_libs=False)
+
+        cfg = proj.analyses.CFGFast()
+
+        node_7bb88 = cfg.model.get_any_node(0x7BB88)
+        assert node_7bb88 is not None
+        assert node_7bb88.function_address == 0x7BA84
+
     @slow_test
     def test_busybox(self):
         edges = {
@@ -1040,6 +1053,14 @@ class TestCfgfastDataReferences(unittest.TestCase):
 
         for testme in ("SOSNEAKY", "Welcome to the admin console, trusted user!\n", "Go away!\n", "Username: \n"):
             assert testme.encode("utf-16-le") in recovered_strings
+
+    def test_data_references_lea_string_addr(self):
+        path = os.path.join(test_location, "x86_64", "windows", "3ware.sys")
+        proj = angr.Project(path, auto_load_libs=False)
+
+        cfg = proj.analyses.CFGFast(data_references=True)
+        assert cfg.memory_data[0x1C0010A20].sort == MemoryDataSort.String
+        assert cfg.memory_data[0x1C0010A20].content == b"Initialize> %s"
 
     def test_arm_function_hints_from_data_references(self):
         path = os.path.join(test_location, "armel", "sha224sum")

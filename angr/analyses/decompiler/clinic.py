@@ -63,6 +63,7 @@ class Clinic(Analysis):
         must_struct: Optional[Set[str]] = None,
         variable_kb=None,
         reset_variable_names=False,
+        rewrite_ites_to_diamonds=True,
         cache: Optional["DecompilationCache"] = None,
     ):
         if not func.normalized:
@@ -89,6 +90,7 @@ class Clinic(Analysis):
         self.peephole_optimizations = peephole_optimizations
         self._must_struct = must_struct
         self._reset_variable_names = reset_variable_names
+        self._rewrite_ites_to_diamonds = rewrite_ites_to_diamonds
         self.reaching_definitions: Optional[ReachingDefinitionsAnalysis] = None
         self._cache = cache
 
@@ -176,7 +178,8 @@ class Clinic(Analysis):
         self._convert_all()
 
         ail_graph = self._make_ailgraph()
-        self._rewrite_ite_expressions(ail_graph)
+        if self._rewrite_ites_to_diamonds:
+            self._rewrite_ite_expressions(ail_graph)
         self._remove_redundant_jump_blocks(ail_graph)
         if self._insert_labels:
             self._insert_block_labels(ail_graph)
@@ -523,7 +526,7 @@ class Clinic(Analysis):
         if type(block_node) is not BlockNode:
             return block_node
 
-        block = self.project.factory.block(block_node.addr, block_node.size)
+        block = self.project.factory.block(block_node.addr, block_node.size, cross_insn_opt=False)
 
         ail_block = ailment.IRSBConverter.convert(block.vex, self._ail_manager)
         return ail_block
@@ -1337,8 +1340,8 @@ class Clinic(Analysis):
         cond_jump_stmt = ailment.Stmt.ConditionalJump(
             ite_expr_stmt.idx,
             ite_expr.cond,
-            ailment.Expr.Const(None, None, true_block_addr, self.project.arch.bits),
-            ailment.Expr.Const(None, None, false_block_addr, self.project.arch.bits),
+            ailment.Expr.Const(None, None, true_block_addr, self.project.arch.bits, **ite_expr_stmt.tags),
+            ailment.Expr.Const(None, None, false_block_addr, self.project.arch.bits, **ite_expr_stmt.tags),
             **ite_expr_stmt.tags,
         )
         new_head_ail.statements.append(cond_jump_stmt)
@@ -1423,8 +1426,10 @@ class Clinic(Analysis):
         # in edges
         for src, _ in original_block_in_edges:
             if src is original_block:
-                raise ValueError("Unexpected...")
-            ail_graph.add_edge(src, new_head_ail)
+                # loop
+                ail_graph.add_edge(end_block_ail, new_head_ail)
+            else:
+                ail_graph.add_edge(src, new_head_ail)
 
         # triangle
         ail_graph.add_edge(new_head_ail, true_block_ail)

@@ -11,7 +11,7 @@ from claripy import FSORT_DOUBLE, FSORT_FLOAT
 
 from ...engines.light import SimEngineLight, SimEngineLightAILMixin, SpOffset
 from ...errors import SimEngineError, SimMemoryMissingError
-from ...calling_conventions import default_cc, SimRegArg
+from ...calling_conventions import default_cc, SimRegArg, SimTypeBottom
 from ...storage.memory_mixins.paged_memory.pages.multi_values import MultiValues
 from ...knowledge_plugins.key_definitions.atoms import Atom, Register, Tmp, MemoryLocation
 from ...knowledge_plugins.key_definitions.constants import OP_BEFORE, OP_AFTER
@@ -37,6 +37,7 @@ class SimEngineRDAIL(
         function_handler: Optional[FunctionHandler] = None,
         stack_pointer_tracker=None,
         use_callee_saved_regs_at_return=True,
+        bp_as_gpr: bool = False,
     ):
         super().__init__()
         self.project = project
@@ -45,6 +46,7 @@ class SimEngineRDAIL(
         self._dep_graph = None
         self._stack_pointer_tracker = stack_pointer_tracker
         self._use_callee_saved_regs_at_return = use_callee_saved_regs_at_return
+        self.bp_as_gpr = bp_as_gpr
 
         self._stmt_handlers = {
             ailment.Stmt.Assignment: self._ail_handle_Assignment,
@@ -341,7 +343,12 @@ class SimEngineRDAIL(
         # consume registers that are potentially useful
 
         # return value
-        if cc is not None and prototype is not None and prototype.returnty is not None:
+        if (
+            cc is not None
+            and prototype is not None
+            and prototype.returnty is not None
+            and not isinstance(prototype.returnty, SimTypeBottom)
+        ):
             ret_val = cc.return_val(prototype.returnty)
             if isinstance(ret_val, SimRegArg):
                 if ret_val.clear_entire_reg:
@@ -392,12 +399,13 @@ class SimEngineRDAIL(
         result = data.ret_values
 
         # truncate result if needed
-        if len(result) > expr.bits:
-            result = result.extract((len(result) - expr.bits) // 8, expr.bits // 8, "Iend_BE")
+        if result is not None:
+            if len(result) > expr.bits:
+                result = result.extract((len(result) - expr.bits) // 8, expr.bits // 8, "Iend_BE")
 
-        if result is not None and data.ret_values_deps is not None:
-            for dep in data.ret_values_deps:
-                result = self.state.annotate_mv_with_def(result, dep)
+            if data.ret_values_deps is not None:
+                for dep in data.ret_values_deps:
+                    result = self.state.annotate_mv_with_def(result, dep)
         return result
 
     def _ail_handle_Register(self, expr: ailment.Expr.Register) -> MultiValues:
@@ -413,7 +421,7 @@ class SimEngineRDAIL(
                 sb_offset = self._stack_pointer_tracker.offset_before(self.ins_addr, self.arch.sp_offset)
                 if sb_offset is not None:
                     return MultiValues(v=self.state._initial_stack_pointer() + sb_offset)
-            elif reg_offset == self.arch.bp_offset:
+            elif reg_offset == self.arch.bp_offset and not self.bp_as_gpr:
                 sb_offset = self._stack_pointer_tracker.offset_before(self.ins_addr, self.arch.bp_offset)
                 if sb_offset is not None:
                     return MultiValues(v=self.state._initial_stack_pointer() + sb_offset)
@@ -613,7 +621,7 @@ class SimEngineRDAIL(
 
         return r
 
-    def _ail_handle_Neg(self, expr: ailment.Expr.UnaryOp) -> MultiValues:
+    def _ail_handle_BitwiseNeg(self, expr: ailment.Expr.UnaryOp) -> MultiValues:
         operand: MultiValues = self._expr(expr.operand)
         bits = expr.bits
 
@@ -621,7 +629,7 @@ class SimEngineRDAIL(
         operand_v = operand.one_value()
 
         if operand_v is not None and operand_v.concrete:
-            r = MultiValues(offset_to_values={0: {-operand_v}})
+            r = MultiValues(offset_to_values={0: {~operand_v}})
         else:
             r = MultiValues(offset_to_values={0: {self.state.top(bits)}})
 
@@ -886,6 +894,20 @@ class SimEngineRDAIL(
             r = MultiValues(self.state.top(bits))
 
         return r
+
+    def _ail_handle_Rol(self, expr: ailment.Expr.BinaryOp) -> MultiValues:
+        self._expr(expr.operands[0])
+        self._expr(expr.operands[1])
+        bits = expr.bits
+
+        return MultiValues(self.state.top(bits))
+
+    def _ail_handle_Ror(self, expr: ailment.Expr.BinaryOp) -> MultiValues:
+        self._expr(expr.operands[0])
+        self._expr(expr.operands[1])
+        bits = expr.bits
+
+        return MultiValues(self.state.top(bits))
 
     def _ail_handle_And(self, expr: ailment.Expr.BinaryOp) -> MultiValues:
         expr0: MultiValues = self._expr(expr.operands[0])

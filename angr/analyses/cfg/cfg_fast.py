@@ -1,4 +1,4 @@
-# pylint:disable=superfluous-parens,too-many-boolean-expressions
+# pylint:disable=superfluous-parens,too-many-boolean-expressions,line-too-long
 import itertools
 import logging
 import math
@@ -1577,6 +1577,9 @@ class CFGFast(ForwardAnalysis[CFGNode, CFGNode, CFGJob, int], CFGBase):  # pylin
                 data_type_guessing_handlers=self._data_type_guessing_handlers,
             )
 
+        if self._collect_data_ref:
+            self._post_process_string_references()
+
         CFGBase._post_analysis(self)
 
         # Clean up
@@ -1612,6 +1615,65 @@ class CFGFast(ForwardAnalysis[CFGNode, CFGNode, CFGJob, int], CFGBase):  # pylin
                     l.exception("Error collecting XRefs for function %s.", f.name, exc_info=True)
                 else:
                     l.exception("Error collecting XRefs for function %#x.", f_addr, exc_info=True)
+
+    def _post_process_string_references(self) -> None:
+        """
+        Finds overlapping string references and retrofit them so that we see full strings in memory data.
+
+        This function does not work well for Go binaries or any other binaries where a large non-null-terminating
+        string table is used for all strings in the binary: All strings will be made much longer than they should have
+        been. We try to accommodate these cases using UPDATE_RATIO.
+        """
+
+        MAX_STRING_SIZE = 256
+        UPDATE_RATIO = 0.5
+
+        all_memory_data = sorted(list(self.model.memory_data.items()), key=lambda x: x[0])  # sorted by addr
+        to_update: Dict[int, bytes] = {}
+        total_string_refs: int = 0
+        for i, (addr, md) in enumerate(all_memory_data):
+            if not md.sort == MemoryDataSort.String:
+                continue
+            total_string_refs += 1
+            if md.content is None:
+                continue
+            if md.size != len(md.content):
+                # ending with a null byte
+                continue
+
+            new_content = md.content
+            last_end_addr = addr + md.size
+            for j in range(i + 1, len(all_memory_data)):
+                _, next_md = all_memory_data[j]
+                if (
+                    next_md.addr == last_end_addr
+                    and next_md.sort == MemoryDataSort.String
+                    and next_md.content is not None
+                ):
+                    new_content += next_md.content
+                    if next_md.size != len(next_md.content):
+                        # ending with a null byte
+                        break
+                    # otherwise, continue
+                    last_end_addr = next_md.addr + next_md.size
+                else:
+                    # another data item that's not a string or not immediately following the previous string item
+                    break
+
+                if len(new_content) > MAX_STRING_SIZE:
+                    new_content = new_content[:MAX_STRING_SIZE]
+                    break
+
+            if len(new_content) > len(md.content):
+                to_update[addr] = new_content
+
+        ratio = 1.0 if total_string_refs == 0 else len(to_update) / total_string_refs
+        if ratio < UPDATE_RATIO:
+            # update!
+            for addr, new_content in to_update.items():
+                md = self.model.memory_data[addr]
+                md.reference_size = len(new_content)
+                md.content = new_content
 
     # Methods to get start points for scanning
 
@@ -2518,15 +2580,16 @@ class CFGFast(ForwardAnalysis[CFGNode, CFGNode, CFGJob, int], CFGBase):  # pylin
                 )
 
                 if sec_2nd.is_executable and not self._seg_list.is_occupied(v):
-                    # create a new CFG job
-                    ce = CFGJob(
-                        v,
-                        v,
-                        "Ijk_Boring",
-                        job_type=CFGJobType.DATAREF_HINTS,
-                    )
-                    self._pending_jobs.add_job(ce)
-                    self._register_analysis_job(v, ce)
+                    if v % self.project.arch.instruction_alignment == 0:
+                        # create a new CFG job
+                        ce = CFGJob(
+                            v,
+                            v,
+                            "Ijk_Boring",
+                            job_type=CFGJobType.DATAREF_HINTS,
+                        )
+                        self._pending_jobs.add_job(ce)
+                        self._register_analysis_job(v, ce)
 
                 return
 
@@ -4467,6 +4530,27 @@ class CFGFast(ForwardAnalysis[CFGNode, CFGNode, CFGJob, int], CFGBase):  # pylin
                 # ret
                 func = self.kb.functions.get_by_addr(func_addr)
                 func.info["get_pc"] = "ebx"
+
+        elif self.project.arch.name == "AMD64":
+            # determine if the function uses rbp as a general purpose register or not
+            if addr == func_addr or 0 < addr - func_addr <= 0x20:
+                rbp_as_gpr = True
+                cap = self._lift(addr, size=cfg_node.size).capstone
+                for insn in cap.insns:
+                    if (
+                        insn.mnemonic == "mov"
+                        and len(insn.operands) == 2
+                        and insn.operands[0].type == capstone.x86.X86_OP_REG
+                        and insn.operands[1].type == capstone.x86.X86_OP_REG
+                    ):
+                        if (
+                            insn.operands[0].reg == capstone.x86.X86_REG_RBP
+                            and insn.operands[1].reg == capstone.x86.X86_REG_RSP
+                        ):
+                            rbp_as_gpr = False
+                            break
+                func = self.kb.functions.get_by_addr(func_addr)
+                func.info["bp_as_gpr"] = rbp_as_gpr
 
     def _extract_node_cluster_by_dependency(self, addr, include_successors=False) -> Set[int]:
         to_remove = {addr}
