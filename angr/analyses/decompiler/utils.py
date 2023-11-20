@@ -5,7 +5,6 @@ from typing import Optional, Tuple, Any, Union, List
 import networkx
 
 import ailment
-import networkx as nx
 
 
 def remove_last_statement(node):
@@ -532,7 +531,7 @@ def peephole_optimize_expr(expr, expr_opts):
     return new_expr
 
 
-def copy_graph(graph: nx.DiGraph):
+def copy_graph(graph: networkx.DiGraph):
     """
     Copy AIL Graph.
 
